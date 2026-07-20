@@ -5,7 +5,6 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 SITE_NAME = "site"
 VALIDATION_TIMEOUT = 120
 EMPTY_MOLECULE = re.compile(r"\b([A-Za-z_]\w*)\s*\(\s*\)")
@@ -14,10 +13,8 @@ METHOD_ARGUMENT = re.compile(
     re.IGNORECASE,
 )
 
-
 class ConversionError(Exception):
     pass
-
 
 @dataclass(slots=True)
 class ConversionResult:
@@ -27,24 +24,20 @@ class ConversionResult:
     validation_passed: bool | None = None
     validation_message: str = ""
 
-
 def split_comment(line: str) -> tuple[str, str]:
     position = line.find("#")
     return (line, "") if position == -1 else (line[:position], line[position:])
-
 
 def is_marker(line: str, marker: str) -> bool:
     code = split_comment(line)[0].strip().lower()
     marker = marker.lower()
     return code == marker or code.startswith(f"{marker} ")
 
-
 def find_line(lines: list[str], marker: str) -> int | None:
     return next(
         (index for index, line in enumerate(lines) if is_marker(line, marker)),
         None,
     )
-
 
 def find_block(
     lines: list[str], name: str, required: bool = True
@@ -58,7 +51,6 @@ def find_block(
     if required:
         raise ConversionError(f"Missing 'begin {name}' or 'end {name}'.")
     return None
-
 
 def replace_empty_molecules(lines: list[str]) -> int:
     molecule_types = find_block(lines, "molecule types")
@@ -93,20 +85,19 @@ def replace_empty_molecules(lines: list[str]) -> int:
 
     return replacements
 
-
 def mask_comments(text: str) -> str:
     masked = []
     for line in text.splitlines(keepends=True):
         code, comment = split_comment(line)
-        masked.append(code + "".join("\n" if char == "\n" else " " for char in comment))
+        masked.append(
+            code + "".join("\n" if char == "\n" else " " for char in comment)
+        )
     return "".join(masked)
-
 
 def find_identifier(text: str, name: str, start: int = 0) -> int:
     pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
     match = pattern.search(text, start)
     return -1 if match is None else match.start()
-
 
 def find_call_end(text: str, opening: int) -> int | None:
     depth = 0
@@ -136,7 +127,6 @@ def find_call_end(text: str, opening: int) -> int | None:
 
     return None
 
-
 def find_call(text: str, name: str) -> str | None:
     visible = mask_comments(text)
     search_from = 0
@@ -157,7 +147,6 @@ def find_call(text: str, name: str) -> str | None:
 
         search_from = start + len(name)
 
-
 def set_nf_method(simulate_call: str) -> str:
     if METHOD_ARGUMENT.search(simulate_call):
         return METHOD_ARGUMENT.sub('method=>"nf"', simulate_call, count=1)
@@ -171,7 +160,6 @@ def set_nf_method(simulate_call: str) -> str:
         + 'method=>"nf", '
         + simulate_call[opening_brace + 1 :]
     )
-
 
 def rewrite_actions(lines: list[str]) -> bool:
     model = find_block(lines, "model")
@@ -195,7 +183,6 @@ def rewrite_actions(lines: list[str]) -> bool:
     lines[model[1] + 1 :] = new_suffix
     return simulate is not None
 
-
 def validator_command(validator: str | Path | None) -> list[str] | None:
     if validator:
         path = str(Path(validator).expanduser().resolve())
@@ -207,7 +194,6 @@ def validator_command(validator: str | Path | None) -> list[str] | None:
 
     bionetgen = shutil.which("bionetgen")
     return [bionetgen, "run", "-i"] if bionetgen else None
-
 
 def validate_bngl(
     bngl_file: Path, validator: str | Path | None = None
@@ -252,7 +238,6 @@ def validate_bngl(
     if completed.returncode != 0 or reported_error:
         return False, message or "BioNetGen validation failed."
     return True, message or "BioNetGen validation passed."
-
 
 def convert_file(
     input_file: str | Path,
