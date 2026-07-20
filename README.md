@@ -24,23 +24,33 @@ The converter:
 
 ## Running BNGLForge
 
-Replace '<model_name>' with the name of your BNGL file.
+Replace `<model_name>` with the name of your BNGL file.
 
-### macOS/Linux:
+### macOS/Linux
+
+```bash
 python3 run.py <model_name>.bngl
+```
 
 ### Windows
+
+```powershell
 py run.py <model_name>.bngl
+```
 
 This creates:
 
+```text
 <model_name>_molclustpy.bngl
+```
 
 ### Options
 
 Skip validation:
 
+```bash
 python3 run.py <model_name>.bngl --skip-validation
+```
 
 Specify `BNG2.pl`:
 
