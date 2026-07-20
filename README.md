@@ -22,35 +22,34 @@ The converter:
 - Python 3.10 or newer
 - BioNetGen and 'BNG2.pl' for optional validation
 
-## How to run it
+## Running BNGLForge
 
-Run the converter from the repository folder:
+Replace '<model_name>' with the name of your BNGL file.
 
-python3 run.py path/to/model.bngl
+### macOS/Linux:
+python3 run.py <model_name>.bngl
 
-Example:
-
-python3 run.py models/example.bngl
-
+### Windows
+py run.py <model_name>.bngl
 
 This creates:
 
-models/example_molclustpy.bngl
+<model_name>_molclustpy.bngl
 
-## Command options
+### Options
 
-Skip BioNetGen validation:
+Skip validation:
 
-python3 run.py model.bngl --skip-validation
+python3 run.py <model_name>.bngl --skip-validation
 
-Provide the path to `BNG2.pl`:
+Specify `BNG2.pl`:
 
-python3 run.py model.bngl --validator /path/to/BNG2.pl
+```bash
+python3 run.py <model_name>.bngl --validator /path/to/BNG2.pl
+```
 
-Replace an existing converted file:
+Overwrite an existing output:
 
-python3 run.py model.bngl --force
-
-Options can be combined:
-
-python3 run.py model.bngl --validator /path/to/BNG2.pl --force
+```bash
+python3 run.py <model_name>.bngl --force
+```
