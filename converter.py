@@ -1,16 +1,12 @@
-import shutil
-import subprocess
-import tempfile
+import shutil, subprocess, tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-
-SITE_NAME = "site"
-TIMEOUT = 120
+SITE_NAME, TIMEOUT = "site", 120
 
 class ConversionError(Exception): pass
 class ConversionResult:
-    def __init__(self, f):
-        self.output_file = f
+    def __init__(self, output_file):
+        self.output_file = output_file
         self.changes, self.warnings = [], []
         self.validation_passed, self.validation_message = None, ""
 
@@ -19,12 +15,19 @@ def strip_comment(line):
     return (line, "") if p < 0 else (line[:p], line[p:])
 
 def mask_comments(text):
-    out = []
-    for line in text.splitlines(keepends=True):
-        p = line.find("#")
-        out.append(line if p < 0 else line[:p] + "".join(c if c in "\r\n" else " " for c in line[p:]))
+    out, quote, escaped, comment = list(text), None, False, False
+    for i, c in enumerate(text):
+        if comment:
+            if c in "\r\n": comment = False
+            else: out[i] = " "
+        elif quote:
+            if c not in "\r\n": out[i] = " "
+            if escaped: escaped = False
+            elif c == "\\": escaped = True
+            elif c == quote: quote = None
+        elif c == "#": comment = True; out[i] = " "
+        elif c in "'\"": quote = c; out[i] = " "
     return "".join(out)
-
 def find_block(text, name):
     op, cl = f"begin {name.lower()}", f"end {name.lower()}"
     start, body = None, None
@@ -131,26 +134,21 @@ def fix_populations(text, changes, warnings):
     return text
 
 def get_closing_paren(text, start):
-    depth, quote, esc = 0, None, False
+    depth, quote, escaped = 0, None, False
     for i in range(start, len(text)):
         c = text[i]
         if quote:
-            if esc: esc = False
-            elif c == "\\": esc = True
+            if escaped: escaped = False
+            elif c == "\\": escaped = True
             elif c == quote: quote = None
         elif c in "'\"": quote = c
         elif c == "(": depth += 1
         elif c == ")":
             depth -= 1
-            if depth == 0:
-                nxt = i + 1
-                while nxt < len(text) and text[nxt].isspace(): nxt += 1
-                if nxt < len(text) and text[nxt] == ";": nxt += 1
-                return nxt
+            if depth == 0: return i + 1
     return None
-
 def force_nf_method(sim_call):
-    lowered, start = sim_call.lower(), 0
+    lowered, start = mask_comments(sim_call).lower(), 0
     while True:
         pos = lowered.find("method", start)
         if pos < 0: break
@@ -192,14 +190,16 @@ def find_ident_call(text, name, start_pos=0):
 def fix_actions(text, changes, warnings):
     masked = mask_comments(text)
     actions = find_block(text, "actions")
-    end_model = masked.lower().rfind("end model")
-    if end_model < 0: raise ConversionError("Could not find 'end model'.")
+    model = find_block(text, "model")
+    if not model: raise ConversionError("Could not find a complete model block.")
+    end_model = model[3]
 
-    sim_call, search_start = None, (actions[2] if actions else end_model)
+    sim_call = None
+    search_start = actions[2] if actions else end_model
     sim_start = find_ident_call(masked, "simulate", search_start)
     if sim_start >= 0 and (not actions or sim_start < actions[3]):
         paren = masked.find("(", sim_start)
-        if paren > 0:
+        if paren >= 0:
             close = get_closing_paren(masked, paren)
             if close: sim_call = text[sim_start:close]
 
@@ -211,39 +211,44 @@ def fix_actions(text, changes, warnings):
     if actions:
         text = text[:actions[0]] + text[actions[1]:]
         masked = mask_comments(text)
-        end_model = masked.lower().rfind("end model")
+        model = find_block(text, "model")
+        end_model = model[3]
 
-    line_start = text.rfind("\n", 0, end_model)
-    line_start = line_start + 1 if line_start >= 0 else 0
-    line_end = text.find("\n", end_model)
-    line_end = line_end + 1 if line_end >= 0 else len(text)
-
+    line_start, line_end = model[3], model[1]
     clean_lines, p = [], line_end
+
     while p < len(text):
         next_nl = text.find("\n", p)
         if next_nl < 0: next_nl = len(text)
-        line_str, m_line_str = text[p:next_nl], masked[p:next_nl]
-        cc = strip_comment(m_line_str.strip())[0].strip()
-        is_standalone = False
-        if cc:
-            idx = 0
-            while idx < len(cc) and (cc[idx].isalnum() or cc[idx] == "_"): idx += 1
-            if idx > 0:
-                op = idx
-                while op < len(cc) and cc[op].isspace(): op += 1
-                if op < len(cc) and cc[op] == "(": is_standalone = True
+        line_str, masked_line = text[p:next_nl], masked[p:next_nl]
+        code = masked_line.strip()
+        standalone = False
 
-        if not is_standalone:
+        if code:
+            i = 0
+            while i < len(code) and (code[i].isalnum() or code[i] == "_"): i += 1
+            if i:
+                opening = i
+                while opening < len(code) and code[opening].isspace(): opening += 1
+                standalone = opening < len(code) and code[opening] == "("
+
+        if not standalone:
             clean_lines.append(line_str + "\n" if next_nl < len(text) else line_str)
         else:
-            paren_idx = masked.find("(", p)
-            if paren_idx >= 0:
-                close_idx = get_closing_paren(masked, paren_idx)
-                if close_idx: p = close_idx; continue
+            paren = masked.find("(", p)
+            close = get_closing_paren(masked, paren) if paren >= 0 else None
+            if close:
+                p = close
+                while p < len(text) and text[p] in " \t": p += 1
+                if p < len(text) and text[p] == ";": p += 1
+                while p < len(text) and text[p] in " \t": p += 1
+                if text.startswith("\r\n", p): p += 2
+                elif p < len(text) and text[p] in "\r\n": p += 1
+                continue
+
         p = next_nl + 1 if next_nl < len(text) else len(text)
 
     return text[:line_start] + new_actions + text[line_start:line_end] + "".join(clean_lines)
-
 def validate_bngl(filepath, validator=None):
     if validator:
         val_path = Path(validator)
@@ -266,7 +271,7 @@ def validate_bngl(filepath, validator=None):
     if res.returncode != 0: return False, msg or "Validation failed."
     for line in (out + "\n" + err).splitlines():
         cl = line.strip().lower()
-        if cl.startswith("error") or cl.startswith("fatal") or "syntax error" in cl:
+        if cl.startswith(("error", "fatal", "syntax error")):
             return False, msg or "Validation failed."
     return True, msg or "Validation passed."
 
