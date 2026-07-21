@@ -1,65 +1,88 @@
 # BNGLForge
 
-BNGLForge helps automate the preperation of a '.bngl' model for use with MolClustPy.
+BNGLForge prepares `.bngl` models for MolClustPy.
 
-## What the code does
+## Files
 
-The converter:
-
-- Reads one '.bngl' model.
-- Keeps the original file unchanged.
-- Creates a new file named '<model>_molclustpy.bngl'.
-- Adds 'writeXML()'.
-- Removes actions that are not needed by MolClustPy.
-- Changes the simulation method to 'nf'.
-- Changes molecules declared with no sites, such as 'A()', to 'A(site)' throughout the model.
-- Preserves all numeric values exactly as written.
-- Optionally validates the converted model with BioNetGen.
-- Renames failed validation output to '<model>_molclustpy_FAILED_VALIDATION.bngl'.
+* `converter.py`: conversion code
+* `run.py`: converts one BNGL file
+* `metadata_compatibility.py`: checks metadata before converting
 
 ## Requirements
 
-- Python 3.10 or newer
-- BioNetGen and 'BNG2.pl' for optional validation
+* Python 3.10 or newer
+* BioNetGen and `BNG2.pl` for validation
 
-## Running BNGLForge
-
-Replace `<model_name>` with the name of your BNGL file.
+## Convert one model
 
 ### macOS/Linux
 
 ```bash
-python3 run.py <model_name>.bngl
+python3 run.py <model>.bngl
 ```
 
 ### Windows
 
 ```powershell
-py run.py <model_name>.bngl
+py run.py <model>.bngl
 ```
 
-This creates:
+The original file is kept. The output is:
 
 ```text
-<model_name>_molclustpy.bngl
+<model>_molclustpy.bngl
 ```
+
+The converter:
+
+* Adds `writeXML()`
+* Changes the simulation method to `nf`
+* Removes unnecessary actions
+* Changes empty molecules such as `A()` to `A(site)`
+* Preserves numeric values
+* Can validate the output with BioNetGen
 
 ### Options
 
 Skip validation:
 
 ```bash
-python3 run.py <model_name>.bngl --skip-validation
+python3 run.py <model>.bngl --skip-validation
 ```
 
 Specify `BNG2.pl`:
 
 ```bash
-python3 run.py <model_name>.bngl --validator /path/to/BNG2.pl
+python3 run.py <model>.bngl --validator /path/to/BNG2.pl
 ```
 
 Overwrite an existing output:
 
 ```bash
-python3 run.py <model_name>.bngl --force
+python3 run.py <model>.bngl --force
+```
+
+## Convert using metadata
+
+The folder must contain `metadata.yaml` and one `.bngl` file.
+
+Check MolClustPy compatibility:
+
+```bash
+python3 metadata_compatibility.py <folder> -molclustpy
+```
+
+Check NFsim compatibility:
+
+```bash
+python3 metadata_compatibility.py <folder> -nfsim
+```
+
+The script converts the model only when the selected compatibility value is `true`.
+
+### RuleHub example
+
+```bash
+python3 scripts/metadata_compatibility.py \
+Published/Mitra2019/04-egfrnf -nfsim
 ```
