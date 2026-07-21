@@ -1,337 +1,295 @@
-import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 SITE_NAME = "site"
-VALIDATION_TIMEOUT = 120
-EMPTY_MOLECULE = re.compile(r"\b([A-Za-z_]\w*)\s*\(\s*\)")
-METHOD_ARGUMENT = re.compile(
-    r"\bmethod\s*=>\s*(?:\"[^\"]*\"|'[^']*'|[^,\s}]+)",
-    re.IGNORECASE,
-)
+TIMEOUT = 120
 
-class ConversionError(Exception):
-    pass
-
-@dataclass(slots=True)
+class ConversionError(Exception): pass
 class ConversionResult:
-    output_file: Path
-    changes: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    validation_passed: bool | None = None
-    validation_message: str = ""
+    def __init__(self, f):
+        self.output_file = f
+        self.changes, self.warnings = [], []
+        self.validation_passed, self.validation_message = None, ""
 
-def split_comment(line: str) -> tuple[str, str]:
-    position = line.find("#")
-    return (line, "") if position == -1 else (line[:position], line[position:])
+def strip_comment(line):
+    p = line.find("#")
+    return (line, "") if p < 0 else (line[:p], line[p:])
 
-def is_marker(line: str, marker: str) -> bool:
-    code = split_comment(line)[0].strip().lower()
-    marker = marker.lower()
-    return code == marker or code.startswith(f"{marker} ")
-
-def find_line(lines: list[str], marker: str) -> int | None:
-    return next(
-        (index for index, line in enumerate(lines) if is_marker(line, marker)),
-        None,
-    )
-
-def find_block(
-    lines: list[str], name: str, required: bool = True
-) -> tuple[int, int] | None:
-    start = find_line(lines, f"begin {name}")
-
-    if start is not None:
-        for end in range(start + 1, len(lines)):
-            if is_marker(lines[end], f"end {name}"):
-                return start, end
-
-    if required:
-        raise ConversionError(f"Missing 'begin {name}' or 'end {name}'.")
-
-    return None
-
-def replace_empty_molecules(lines: list[str]) -> int:
-    molecule_types = find_block(lines, "molecule types")
-    model = find_block(lines, "model")
-
-    if molecule_types is None or model is None:
-        raise ConversionError("Required BNGL model blocks were not found.")
-
-    empty_names = {
-        match.group(1)
-        for line in lines[molecule_types[0] + 1 : molecule_types[1]]
-        for match in EMPTY_MOLECULE.finditer(split_comment(line)[0])
-    }
-
-    if not empty_names:
-        return 0
-
-    actions = find_block(lines, "actions", required=False)
-    replacements = 0
-
-    def replace(match: re.Match[str]) -> str:
-        nonlocal replacements
-        name = match.group(1)
-
-        if name not in empty_names:
-            return match.group(0)
-
-        replacements += 1
-        return f"{name}({SITE_NAME})"
-
-    for index in range(model[0] + 1, model[1]):
-        if actions and actions[0] <= index <= actions[1]:
-            continue
-
-        code, comment = split_comment(lines[index])
-        lines[index] = EMPTY_MOLECULE.sub(replace, code) + comment
-
-    return replacements
-
-def mask_comments(text: str) -> str:
-    masked = []
-
+def mask_comments(text):
+    out = []
     for line in text.splitlines(keepends=True):
-        code, comment = split_comment(line)
-        masked.append(
-            code + "".join("\n" if char == "\n" else " " for char in comment)
-        )
+        p = line.find("#")
+        out.append(line if p < 0 else line[:p] + "".join(c if c in "\r\n" else " " for c in line[p:]))
+    return "".join(out)
 
-    return "".join(masked)
-
-def find_identifier(text: str, name: str, start: int = 0) -> int:
-    pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
-    match = pattern.search(text, start)
-    return -1 if match is None else match.start()
-
-def find_call_end(text: str, opening: int) -> int | None:
-    depth = 0
-    quote = None
-    escaped = False
-
-    for index in range(opening, len(text)):
-        character = text[index]
-
-        if quote:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == quote:
-                quote = None
-            continue
-
-        if character in "'\"":
-            quote = character
-        elif character == "(":
-            depth += 1
-        elif character == ")":
-            depth -= 1
-
-            if depth == 0:
-                return index + 1
-
+def find_block(text, name):
+    op, cl = f"begin {name.lower()}", f"end {name.lower()}"
+    start, body = None, None
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        end = pos + len(line)
+        cc = " ".join(strip_comment(line)[0].strip().lower().split())
+        if start is None and (cc == op or cc.startswith(op + " ")):
+            start, body = pos, end
+        elif start is not None and (cc == cl or cc.startswith(cl + " ")):
+            return start, end, body, pos
+        pos = end
     return None
 
-def find_call(text: str, name: str) -> str | None:
-    visible = mask_comments(text)
-    search_from = 0
+def find_empty_calls(text):
+    calls, p = [], 0
+    while p < len(text):
+        if not (text[p].isalpha() or text[p] == "_") or (p > 0 and (text[p-1].isalnum() or text[p-1] == "_")):
+            p += 1; continue
+        end = p + 1
+        while end < len(text) and (text[end].isalnum() or text[end] == "_"): end += 1
+        op = end
+        while op < len(text) and text[op].isspace(): op += 1
+        cl = op + 1
+        if op < len(text) and text[op] == "(":
+            while cl < len(text) and text[cl].isspace(): cl += 1
+            if cl < len(text) and text[cl] == ")":
+                calls.append((p, cl + 1, text[p:end])); p = cl + 1; continue
+        p = end
+    return calls
 
+def replace_empty_sites(text, changes):
+    b = find_block(text, "molecule types")
+    if not b: raise ConversionError("Missing 'molecule types'.")
+    names = {name for line in text[b[2]:b[3]].splitlines() for _, _, name in find_empty_calls(strip_comment(line)[0])}
+    for name in names:
+        rep, total = f"{name}({SITE_NAME})", 0
+        for bn in ("molecule types", "seed species"):
+            tgt = find_block(text, bn)
+            if not tgt: continue
+            lines = []
+            for line in text[tgt[2]:tgt[3]].splitlines(keepends=True):
+                code, comm = strip_comment(line)
+                pieces, last = [], 0
+                for start, end, found in find_empty_calls(code):
+                    if found == name:
+                        pieces.extend([code[last:start], rep]); last = end; total += 1
+                code = "".join(pieces) + code[last:] if last > 0 else code
+                lines.append(code + comm)
+            text = text[:tgt[2]] + "".join(lines) + text[tgt[3]:]
+        if total: changes.append(f"Changed {name}() to {rep} in {total} place(s).")
+    return text
+
+def fix_populations(text, changes, warnings):
+    seed = find_block(text, "seed species")
+    if not seed: raise ConversionError("Missing 'seed species'.")
+    base, errs, lines, names = text.count("\n", 0, seed[2]) + 1, [], [], set()
+    for offset, line in enumerate(text[seed[2]:seed[3]].splitlines(keepends=True)):
+        code, comm = strip_comment(line)
+        toks = code.split()
+        if len(toks) >= 2:
+            val = toks[-1]
+            try:
+                num = Decimal(val)
+                if not (num.is_finite() and num >= 0 and num == num.to_integral_value()):
+                    errs.append(f"Invalid count line {base+offset}: '{val}'")
+                else:
+                    fixed = str(int(num))
+                    if fixed != val:
+                        p = code.rfind(val)
+                        code = code[:p] + fixed + code[p + len(val):]
+                        changes.append(f"Changed seed count {val} to {fixed}.")
+            except InvalidOperation:
+                if val and (val[0].isalpha() or val[0] == "_") and all(c.isalnum() or c == "_" for c in val):
+                    names.add(val)
+                else: warnings.append(f"Line {base+offset}: unverified '{val}'.")
+        lines.append(code + comm)
+    text = text[:seed[2]] + "".join(lines) + text[seed[3]:]
+    if names:
+        params = find_block(text, "parameters")
+        if not params: raise ConversionError("Missing 'parameters'.")
+        p_base, p_lines, found = text.count("\n", 0, params[2]) + 1, [], set()
+        for offset, line in enumerate(text[params[2]:params[3]].splitlines(keepends=True)):
+            code, comm = strip_comment(line)
+            toks = code.split()
+            if toks and toks[0] in names and len(toks) >= 2:
+                name, val = toks[0], (toks[2] if len(toks) > 2 and toks[1] == '=' else toks[1])
+                found.add(name)
+                try:
+                    num = Decimal(val)
+                    if not (num.is_finite() and num >= 0 and num == num.to_integral_value()):
+                        errs.append(f"Invalid param count line {p_base+offset}: '{val}'")
+                    else:
+                        fixed = str(int(num))
+                        if fixed != val:
+                            p = code.rfind(val)
+                            code = code[:p] + fixed + code[p + len(val):]
+                            changes.append(f"Changed param {name} to {fixed}.")
+                except InvalidOperation: warnings.append(f"Param '{name}' not numeric.")
+            p_lines.append(code + comm)
+        text = text[:params[2]] + "".join(p_lines) + text[params[3]:]
+        for m in (names - found): warnings.append(f"Seed ref '{m}' not found.")
+    if errs: raise ConversionError("Population validation failed:\n" + "\n".join(errs))
+    return text
+
+def get_closing_paren(text, start):
+    depth, quote, esc = 0, None, False
+    for i in range(start, len(text)):
+        c = text[i]
+        if quote:
+            if esc: esc = False
+            elif c == "\\": esc = True
+            elif c == quote: quote = None
+        elif c in "'\"": quote = c
+        elif c == "(": depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                nxt = i + 1
+                while nxt < len(text) and text[nxt].isspace(): nxt += 1
+                if nxt < len(text) and text[nxt] == ";": nxt += 1
+                return nxt
+    return None
+
+def force_nf_method(sim_call):
+    lowered, start = sim_call.lower(), 0
     while True:
-        start = find_identifier(visible, name, search_from)
+        pos = lowered.find("method", start)
+        if pos < 0: break
+        if (pos == 0 or not (lowered[pos-1].isalnum() or lowered[pos-1] == "_")) and \
+           (pos + 6 >= len(lowered) or not (lowered[pos+6].isalnum() or lowered[pos+6] == "_")):
+            arrow = pos + 6
+            while arrow < len(sim_call) and sim_call[arrow].isspace(): arrow += 1
+            if sim_call[arrow:arrow+2] == "=>":
+                val_start = arrow + 2
+                while val_start < len(sim_call) and sim_call[val_start].isspace(): val_start += 1
+                end = val_start
+                if end < len(sim_call) and sim_call[end] in "'\"":
+                    q = sim_call[end]; end += 1; esc = False
+                    while end < len(sim_call):
+                        c = sim_call[end]; end += 1
+                        if esc: esc = False
+                        elif c == "\\": esc = True
+                        elif c == q: break
+                else:
+                    while end < len(sim_call) and (sim_call[end].isalnum() or sim_call[end] == "_"): end += 1
+                return sim_call[:pos] + 'method=>"nf"' + sim_call[end:]
+        start = pos + 6
+    brace = sim_call.find("{")
+    return sim_call if brace < 0 else sim_call[:brace+1] + 'method=>"nf", ' + sim_call[brace+1:]
 
-        if start == -1:
-            return None
+def find_ident_call(text, name, start_pos=0):
+    p = start_pos
+    while p < len(text):
+        idx = text.lower().find(name, p)
+        if idx < 0: return -1
+        if (idx == 0 or not (text[idx-1].isalnum() or text[idx-1] == "_")) and \
+           (idx + len(name) >= len(text) or not (text[idx+len(name)].isalnum() or text[idx+len(name)] == "_")):
+            paren = idx + len(name)
+            while paren < len(text) and text[paren].isspace(): paren += 1
+            if paren < len(text) and text[paren] == "(": return idx
+        p = idx + 1
+    return -1
 
-        opening = start + len(name)
+def fix_actions(text, changes, warnings):
+    masked = mask_comments(text)
+    actions = find_block(text, "actions")
+    end_model = masked.lower().rfind("end model")
+    if end_model < 0: raise ConversionError("Could not find 'end model'.")
 
-        while opening < len(visible) and visible[opening].isspace():
-            opening += 1
+    sim_call, search_start = None, (actions[2] if actions else end_model)
+    sim_start = find_ident_call(masked, "simulate", search_start)
+    if sim_start >= 0 and (not actions or sim_start < actions[3]):
+        paren = masked.find("(", sim_start)
+        if paren > 0:
+            close = get_closing_paren(masked, paren)
+            if close: sim_call = text[sim_start:close]
 
-        if opening < len(visible) and visible[opening] == "(":
-            end = find_call_end(visible, opening)
-
-            if end is not None:
-                return text[start:end]
-
-        search_from = start + len(name)
-
-def set_nf_method(simulate_call: str) -> str:
-    if METHOD_ARGUMENT.search(simulate_call):
-        return METHOD_ARGUMENT.sub('method=>"nf"', simulate_call, count=1)
-
-    opening_brace = simulate_call.find("{")
-
-    if opening_brace == -1:
-        return simulate_call
-
-    return (
-        simulate_call[: opening_brace + 1]
-        + 'method=>"nf", '
-        + simulate_call[opening_brace + 1 :]
-    )
-
-def rewrite_actions(lines: list[str]) -> bool:
-    model = find_block(lines, "model")
-    actions = find_block(lines, "actions", required=False)
-
-    if model is None:
-        raise ConversionError("Model block was not found.")
+    new_code = force_nf_method(sim_call).strip() if sim_call else ""
+    if not sim_call: warnings.append("No simulate(...) action found.")
+    changes.append("Inserted writeXML() and NFsim method before end model.")
+    new_actions = f"\nbegin actions\n    writeXML()\n    {new_code}\nend actions\n"
 
     if actions:
-        action_text = "".join(lines[actions[0] + 1 : actions[1]])
-        del lines[actions[0] : actions[1] + 1]
-        model = find_block(lines, "model")
+        text = text[:actions[0]] + text[actions[1]:]
+        masked = mask_comments(text)
+        end_model = masked.lower().rfind("end model")
 
-        if model is None:
-            raise ConversionError("Model block was not found.")
-    else:
-        action_text = "".join(lines[model[1] + 1 :])
+    line_start = text.rfind("\n", 0, end_model)
+    line_start = line_start + 1 if line_start >= 0 else 0
+    line_end = text.find("\n", end_model)
+    line_end = line_end + 1 if line_end >= 0 else len(text)
 
-    simulate = find_call(action_text, "simulate")
-    new_suffix = ["\nwriteXML()\n"]
+    clean_lines, p = [], line_end
+    while p < len(text):
+        next_nl = text.find("\n", p)
+        if next_nl < 0: next_nl = len(text)
+        line_str, m_line_str = text[p:next_nl], masked[p:next_nl]
+        cc = strip_comment(m_line_str.strip())[0].strip()
+        is_standalone = False
+        if cc:
+            idx = 0
+            while idx < len(cc) and (cc[idx].isalnum() or cc[idx] == "_"): idx += 1
+            if idx > 0:
+                op = idx
+                while op < len(cc) and cc[op].isspace(): op += 1
+                if op < len(cc) and cc[op] == "(": is_standalone = True
 
-    if simulate:
-        new_suffix.append(set_nf_method(simulate).strip() + "\n")
+        if not is_standalone:
+            clean_lines.append(line_str + "\n" if next_nl < len(text) else line_str)
+        else:
+            paren_idx = masked.find("(", p)
+            if paren_idx >= 0:
+                close_idx = get_closing_paren(masked, paren_idx)
+                if close_idx: p = close_idx; continue
+        p = next_nl + 1 if next_nl < len(text) else len(text)
 
-    lines[model[1] + 1 :] = new_suffix
-    return simulate is not None
+    return text[:line_start] + new_actions + text[line_start:line_end] + "".join(clean_lines)
 
-def validator_command(validator: str | Path | None) -> list[str] | None:
+def validate_bngl(filepath, validator=None):
     if validator:
-        path = str(Path(validator).expanduser().resolve())
-        return ["perl", path] if path.lower().endswith(".pl") else [path]
+        val_path = Path(validator)
+        cmd = ["perl", str(val_path)] if val_path.suffix.lower() == ".pl" else [str(validator)]
+    else:
+        bng2, bionetgen = shutil.which("BNG2.pl"), shutil.which("bionetgen")
+        if bng2: cmd = ["perl", bng2]
+        elif bionetgen: cmd = [bionetgen, "run", "-i"]
+        else: return None, "BioNetGen not found in PATH."
 
-    bng2 = shutil.which("BNG2.pl")
-
-    if bng2:
-        return ["perl", bng2]
-
-    bionetgen = shutil.which("bionetgen")
-    return [bionetgen, "run", "-i"] if bionetgen else None
-
-def validate_bngl(
-    bngl_file: Path, validator: str | Path | None = None
-) -> tuple[bool | None, str]:
-    command = validator_command(validator)
-
-    if command is None:
-        return None, "BioNetGen not found. Use --validator or --skip-validation."
-
-    with tempfile.TemporaryDirectory(prefix="bnglforge_") as folder:
-        copied_file = Path(folder) / bngl_file.name
-        shutil.copy2(bngl_file, copied_file)
-
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_file = Path(tmp_dir) / filepath.name
+        shutil.copy2(filepath, tmp_file)
         try:
-            completed = subprocess.run(
-                [*command, str(copied_file)],
-                cwd=folder,
-                text=True,
-                capture_output=True,
-                timeout=VALIDATION_TIMEOUT,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return False, "BioNetGen validation timed out."
-        except OSError as error:
-            return False, f"Could not start BioNetGen: {error}"
+            res = subprocess.run([*cmd, str(tmp_file)], cwd=tmp_dir, text=True, capture_output=True, timeout=TIMEOUT, check=False)
+        except Exception as e: return False, f"Failed validator: {e}"
 
-    stdout = completed.stdout.strip()
-    stderr = completed.stderr.strip()
+    out, err = res.stdout.strip(), res.stderr.strip()
+    msg = "\n\n".join(filter(None, [f"STDOUT:\n{out}" if out else "", f"STDERR:\n{err}" if err else ""]))
+    if res.returncode != 0: return False, msg or "Validation failed."
+    for line in (out + "\n" + err).splitlines():
+        cl = line.strip().lower()
+        if cl.startswith("error") or cl.startswith("fatal") or "syntax error" in cl:
+            return False, msg or "Validation failed."
+    return True, msg or "Validation passed."
 
-    message = "\n\n".join(
-        part
-        for part in (
-            f"STDOUT:\n{stdout}" if stdout else "",
-            f"STDERR:\n{stderr}" if stderr else "",
-        )
-        if part
-    )
+def convert_file(input_file, run_validation=True, validator=None, force=False):
+    src = Path(input_file).expanduser().resolve()
+    if not src.is_file(): raise ConversionError(f"File not found: {src}")
+    if src.suffix.lower() != ".bngl": raise ConversionError("Input must end in .bngl")
+    if src.stem.endswith("_molclustpy"): raise ConversionError("Already converted file.")
+    out = src.with_name(f"{src.stem}_molclustpy.bngl")
+    if out.exists() and not force: raise ConversionError(f"Output exists: {out.name}. Use --force.")
 
-    reported_error = any(
-        line.strip().startswith(("error", "fatal")) or "syntax error" in line
-        for line in f"{stdout}\n{stderr}".lower().splitlines()
-    )
+    res = ConversionResult(out)
+    text = src.read_text()
+    text = replace_empty_sites(text, res.changes)
+    text = fix_populations(text, res.changes, res.warnings)
+    text = fix_actions(text, res.changes, res.warnings)
 
-    if completed.returncode != 0 or reported_error:
-        return False, message or "BioNetGen validation failed."
-
-    return True, message or "BioNetGen validation passed."
-
-def convert_file(
-    input_file: str | Path,
-    *,
-    run_validation: bool = True,
-    validator: str | Path | None = None,
-    force: bool = False,
-) -> ConversionResult:
-    source = Path(input_file).expanduser().resolve()
-
-    if not source.is_file():
-        raise ConversionError(f"File not found: {source}")
-
-    if source.suffix.lower() != ".bngl":
-        raise ConversionError("Input must be a .bngl file.")
-
-    if source.stem.endswith(
-        ("_molclustpy", "_molclustpy_FAILED_VALIDATION")
-    ):
-        raise ConversionError("Use the original BNGL file.")
-
-    output = source.with_name(f"{source.stem}_molclustpy.bngl")
-    failed_output = source.with_name(
-        f"{source.stem}_molclustpy_FAILED_VALIDATION.bngl"
-    )
-
-    existing_outputs = [
-        path.name for path in (output, failed_output) if path.exists()
-    ]
-
-    if existing_outputs and not force:
-        raise ConversionError(
-            f"{', '.join(existing_outputs)} already exists. Use --force."
-        )
-
-    if force:
-        output.unlink(missing_ok=True)
-        failed_output.unlink(missing_ok=True)
-
-    lines = source.read_text(encoding="utf-8").splitlines(keepends=True)
-    changes = []
-    warnings = []
-
-    replacements = replace_empty_molecules(lines)
-
-    if replacements:
-        changes.append(f"Added placeholder sites in {replacements} location(s).")
-
-    has_simulation = rewrite_actions(lines)
-    changes.append("Replaced actions with writeXML() and NFsim.")
-
-    if not has_simulation:
-        warnings.append("No simulate(...) action was found.")
-
-    temporary = output.with_name(f".{output.name}.tmp")
-
+    tmp = out.with_name(f".{out.name}.tmp")
     try:
-        temporary.write_text("".join(lines).rstrip() + "\n", encoding="utf-8")
-        temporary.replace(output)
+        tmp.write_text(text.rstrip() + "\n"); tmp.replace(out)
     finally:
-        temporary.unlink(missing_ok=True)
-
-    result = ConversionResult(output, changes, warnings)
+        if tmp.exists(): tmp.unlink()
 
     if run_validation:
-        result.validation_passed, result.validation_message = validate_bngl(
-            output, validator
-        )
-
-        if result.validation_passed is False:
-            output.replace(failed_output)
-            result.output_file = failed_output
-
-    return result
+        res.validation_passed, res.validation_message = validate_bngl(out, validator)
+    return res
