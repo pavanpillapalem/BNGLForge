@@ -23,7 +23,8 @@ def has_flag(metadata, flag):
 
 def main():
     arguments = sys.argv[1:]
-
+    force = "--force" in arguments
+    
     if not arguments:
         print(
             "Use: python metadata_compatibility.py "
@@ -75,9 +76,10 @@ def main():
 
     try:
         result = convert_file(
-            models[0],
-            run_validation=False,
-        )
+        models[0],
+        run_validation=False,
+        force=force,
+)
         print("Created:", result.output_file)
 
     except ConversionError as error:
