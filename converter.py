@@ -65,7 +65,7 @@ def replace_empty_sites(text, changes):
     names = {name for line in text[b[2]:b[3]].splitlines() for _, _, name in find_empty_calls(strip_comment(line)[0])}
     for name in names:
         rep, total = f"{name}({SITE_NAME})", 0
-        for bn in ("molecule types", "seed species"):
+        for bn in ("molecule types", "seed species", "observables", "reaction rules"):
             tgt = find_block(text, bn)
             if not tgt: continue
             lines = []
